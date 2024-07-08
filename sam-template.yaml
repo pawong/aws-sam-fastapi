@@ -1,0 +1,229 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Description: >
+  AWS SAM FastAPI Example
+
+  Example for AWS SAM Template using FastAPI
+
+
+Parameters:
+  EnvType:
+    Type: String
+    Description: Environment type.
+    Default: dev
+    AllowedValues: [dev, prod]
+    ConstraintDescription : Must specify dev or prod.
+
+  DomainName:
+    Type: String
+    Description: API Domain name.
+    Default: ''
+
+  HostedZoneIdValue:
+    # We cannot use optional parameter in CloudFormation for AWS Specific Parameters
+    # Type: AWS::Route53::HostedZone::Id
+    Type: String
+    Description: Route 53 Hosted zone ID value.
+    Default: ''
+
+  AdminsGroupName:
+    Type: String
+    Description: Cognito group name for Administrators
+    Default: admins
+
+Conditions:
+  UseDomainName:
+    !Not
+      - !Equals
+        - !Ref DomainName
+        - ''
+  UseExistingHostedZone:
+    !Not
+      - !Equals
+        - !Ref HostedZoneIdValue
+        - ''
+  NotUseExistingHostedZone:
+    !Not
+      - Condition: UseExistingHostedZone
+  CreateNewHostedZone:
+    !And
+      - !Condition UseDomainName
+      - !Condition NotUseExistingHostedZone
+
+
+Resources:
+  Route53HostedZone:
+    Type: AWS::Route53::HostedZone
+    Condition: CreateNewHostedZone
+    Properties:
+      Name: !Ref DomainName
+
+  ApiCertificateDomain:
+    Type: AWS::CertificateManager::Certificate
+    Condition: UseDomainName
+    Properties:
+      DomainName: !Sub '*.${DomainName}'
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !If [ UseExistingHostedZone, !Ref HostedZoneIdValue , !Ref Route53HostedZone]
+      ValidationMethod: DNS
+      SubjectAlternativeNames:
+        - !Ref DomainName
+
+  ApiDomainName:
+    Type: AWS::ApiGateway::DomainName
+    Condition: UseDomainName
+    Properties:
+      CertificateArn: !Ref ApiCertificateDomain
+      DomainName: !Ref DomainName
+
+  ApiRoute53RecordSetGroup:
+    Type: AWS::Route53::RecordSetGroup
+    Condition: UseDomainName
+    Properties:
+      HostedZoneName: !Sub ${DomainName}.
+      RecordSets:
+        - Name: !Sub ${DomainName}.
+          Type: A
+          AliasTarget:
+            EvaluateTargetHealth: false
+            HostedZoneId: !GetAtt ApiDomainName.DistributionHostedZoneId
+            DNSName: !GetAtt ApiDomainName.DistributionDomainName
+
+  ApiBasePathMapping:
+    Type: AWS::ApiGateway::BasePathMapping
+    Condition: UseDomainName
+    Properties:
+      RestApiId: !Ref FastAPIGateway
+      DomainName: !Ref ApiDomainName
+      BasePath: '(none)'
+      # https://github.com/aws/serverless-application-model/issues/192
+      Stage: !Ref FastAPIGateway.Stage
+
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub ${AWS::StackName}-user-pool
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      UsernameConfiguration:
+        CaseSensitive: false
+      Policies:
+        PasswordPolicy:
+          RequireLowercase: true
+          RequireSymbols: false
+          RequireNumbers: true
+          MinimumLength: 8
+          RequireUppercase: true
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          -
+            Name: verified_email
+            Priority: 1
+      EmailConfiguration:
+          EmailSendingAccount: COGNITO_DEFAULT
+
+  CognitoUserPoolGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: !Ref AdminsGroupName
+      Description: Administrators Group
+      UserPoolId: !Ref CognitoUserPool
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub ${AWS::StackName}-app
+      GenerateSecret: true
+      UserPoolId: !Ref CognitoUserPool
+      SupportedIdentityProviders:
+        - COGNITO
+      PreventUserExistenceErrors: ENABLED
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      ReadAttributes:
+        - email
+        - email_verified
+      WriteAttributes:
+        - email
+
+  FastAPIGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref EnvType
+      OpenApiVersion: '3.0.0'
+      # This property is not working properly right now, see
+      # https://github.com/aws/serverless-application-model/issues/1978
+      # https://github.com/aws/serverless-application-model/issues/2270
+      DisableExecuteApiEndpoint: !If [UseDomainName, true, false]
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt CognitoUserPool.Arn
+            Identity: # OPTIONAL
+              Header: Authorization # OPTIONAL; Default: 'Authorization'
+
+
+  FastAPILambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: root
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:*
+            Resource: arn:aws:logs:*:*:*
+
+  FastAPIApp:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: python3.11
+      Timeout: 300
+      CodeUri: ./
+      Handler: backend.api.main.handler
+      Description: fastAPI AWS lambda example
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref FastAPIGateway
+            Path: /{proxy+}
+            Method: ANY
+            Auth:
+              # FastAPI app is responsible for auth, not AWS
+              Authorizer: NONE
+      Environment:
+        Variables:
+          USERPOOL_ID: !Ref CognitoUserPool
+          APP_CLIENT_ID: !Ref UserPoolClient
+      Role: !GetAtt FastAPILambdaExecutionRole.Arn
+
+Outputs:
+  FastAPI:
+    Description: API Gateway endpoint URL
+    Value: !Sub https://${FastAPIGateway}.execute-api.${AWS::Region}.amazonaws.com/${EnvType}
+  CognitoUserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref CognitoUserPool
+  CognitoAppClientId:
+    Description: Cognito App Client ID
+    Value: !Ref UserPoolClient
