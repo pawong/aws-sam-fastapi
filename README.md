@@ -2,6 +2,9 @@
 
 AWS + SAM + FastAPI + Amazon API Gateway + AWS Lambda + Cognito - Demo
 
+![Tests](https://github.com/pawong/aws-sam-fastapi/workflows/Tests/badge.svg)
+[![codecov](https://codecov.io/gh/pawong/aws-sam-fastapi/branch/master/graph/badge.svg)](https://codecov.io/gh/pawong/aws-sam-fastapi)
+
 ## Prerequisites
 
 ### for Deployment:
