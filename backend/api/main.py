@@ -17,3 +17,6 @@ router.include_router(eight_ball.router, prefix="/8ball", tags=["eight_ball"])
 api.include_router(router)
 
 handler = Mangum(api, lifespan="off")
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8080)
